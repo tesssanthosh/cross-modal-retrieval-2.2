@@ -1,0 +1,13 @@
+# Pin exact versions once your Colab environment is finalised — run `pip freeze` there and
+# copy the relevant lines in. These are starting points matching what the course practicals use.
+torch
+torchvision
+transformers
+datasets>=4
+accelerate
+scikit-learn
+pandas
+numpy
+matplotlib
+seaborn
+Pillow

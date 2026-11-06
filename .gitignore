@@ -1,0 +1,11 @@
+# Don't commit large or regenerable files
+*.pt
+*.pth
+*.ckpt
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.DS_Store
+data/
+*.zip
+# Keep results CSVs and figures (small, needed for the report) — only exclude raw caches above
