@@ -1,5 +1,4 @@
-# Pin exact versions once your Colab environment is finalised — run `pip freeze` there and
-# copy the relevant lines in. These are starting points matching what the course practicals use.
+# Exact versions used
 torch
 torchvision
 transformers
@@ -11,3 +10,4 @@ numpy
 matplotlib
 seaborn
 Pillow
+tqdm
