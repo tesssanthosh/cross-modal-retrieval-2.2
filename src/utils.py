@@ -6,8 +6,10 @@ Import these from every notebook instead of redefining them — this is what the
 signatures below follow the pattern used in the Week 7/8 practicals (score matrix in, metrics out).
 """
 
+import re
 import time
 
+import pandas as pd
 import torch
 import torch.nn.functional as F
 from sklearn.metrics import roc_auc_score
@@ -127,6 +129,89 @@ def extract_bert_features(texts, bert, tokenizer, device, batch_size: int = 128,
         feats.append(pooled.float().cpu())
     elapsed = time.time() - t0
     return torch.cat(feats, dim=0), elapsed
+
+
+# --- Full dataset + feature loader -------------------------------------------------------
+# Notebook 02 builds these features inline (that notebook's job is specifically to build and
+# cache them). From notebook 03 onwards, three different notebooks (03, 04, 06) need the exact
+# same features, so — per this file's own rule — the logic is written once here instead of
+# copy-pasted a third time. It intentionally mirrors notebook 02's logic exactly.
+
+def clean_caption(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def load_rico_splits_with_features(device, splits=("train", "val", "test"),
+                                    image_batch_size: int = 64, text_batch_size: int = 128,
+                                    show_progress: bool = True):
+    """Loads RICO-Screen2Words and extracts frozen ResNet-50 / BERT features for each split.
+
+    Returns (data, resnet, bert) where `data` is a dict keyed by split name, each value a dict:
+      - screenId:            (N,) tensor, one entry per screen
+      - image_features:      (N, 2048) tensor, one row per screen, same order as screenId
+      - flat_df:              DataFrame, one row per (screenId, caption) — all ~5 captions/screen,
+                              columns: screenId, caption_idx, caption, app_package_name, category
+      - flat_text_features:  (M, 768) tensor aligned row-for-row with flat_df (M = len(flat_df))
+      - eval_df:              DataFrame, one row per screen (caption_idx == 0 only), in the SAME
+                              row order as image_features/screenId — i.e. eval_df.iloc[i] and
+                              image_features[i] describe the same screen.
+      - eval_text_features:  (N, 768) tensor, flat_text_features filtered to caption_idx == 0,
+                              aligned row-for-row with eval_df and image_features.
+
+    `resnet`/`bert` are returned too since 03/04 train small heads on top of these same frozen
+    backbones (no need to reload them separately).
+    """
+    from datasets import load_dataset
+
+    ds = load_dataset("rootsautomation/RICO-Screen2Words")
+    resnet, resnet_preprocess = build_resnet50_backbone(device)
+    bert, bert_tokenizer = build_bert_backbone(device)
+
+    data = {}
+    for split_name in splits:
+        split_data = ds[split_name]
+        screen_ids = split_data["screenId"]
+        images = split_data["image"]
+
+        image_features, _ = extract_resnet50_features(
+            images, resnet, resnet_preprocess, device,
+            batch_size=image_batch_size, show_progress=show_progress)
+
+        rows = []
+        for row in split_data:
+            sid, app, cat = row["screenId"], row["app_package_name"], row["category"]
+            for idx, cap in enumerate(row["captions"]):
+                cap_clean = clean_caption(cap)
+                if cap_clean:
+                    rows.append({"screenId": sid, "caption_idx": idx, "caption": cap_clean,
+                                 "app_package_name": app, "category": cat})
+        flat_df = pd.DataFrame(rows)
+
+        flat_text_features, _ = extract_bert_features(
+            flat_df["caption"].tolist(), bert, bert_tokenizer, device,
+            batch_size=text_batch_size, show_progress=show_progress)
+
+        eval_mask = (flat_df["caption_idx"] == 0).values
+        eval_df = flat_df[eval_mask].reset_index(drop=True)
+        eval_text_features = flat_text_features[eval_mask]
+
+        data[split_name] = {
+            "screenId": torch.tensor(screen_ids),
+            "image_features": image_features,
+            "flat_df": flat_df,
+            "flat_text_features": flat_text_features,
+            "eval_df": eval_df,
+            "eval_text_features": eval_text_features,
+        }
+
+    return data, resnet, bert
+
+
+def cosine_score_matrix(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """Row-normalised cosine similarity matrix: result[i, j] = cosine(a[i], b[j])."""
+    a = a / a.norm(dim=1, keepdim=True).clamp(min=1e-9)
+    b = b / b.norm(dim=1, keepdim=True).clamp(min=1e-9)
+    return a @ b.T
 
 
 # TODO: add your plotting helpers here too (score heatmap, training curves) once you've
