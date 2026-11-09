@@ -6,13 +6,18 @@ Import these from every notebook instead of redefining them — this is what the
 signatures below follow the pattern used in the Week 7/8 practicals (score matrix in, metrics out).
 """
 
+import random
 import re
 import time
 
+import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from sklearn.metrics import roc_auc_score
+from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
 
@@ -247,5 +252,323 @@ class PairDataset(torch.utils.data.Dataset):
         return img, txt
 
 
-# TODO: add your plotting helpers here too (score heatmap, training curves) once you've
-# written them once in a notebook — move them here the second time you need them elsewhere.
+# --- Early fusion (technique 1, notebook 03) ---------------------------------------------
+# First defined inline in notebook 03, needed identically (model + training loop + the
+# pairwise-scoring workaround for not having a standalone embedding) in notebook 05's final
+# comparison — moved here per this file's own rule.
+
+class EarlyFusionScorer(nn.Module):
+    """Concatenate [image_embedding ; caption_embedding] then score the pair with a small MLP
+    ("early fusion" — the two modalities are combined before a single network ever sees them,
+    unlike the dual encoder's late fusion via a dot product). Outputs one scalar logit per pair;
+    there is no standalone embedding to cache, which is the architectural root of this
+    technique's retrieval-time cost (see score_matrix_concat below).
+    """
+    def __init__(self, image_dim=2048, text_dim=768, hidden=(512, 128), dropout=0.2):
+        super().__init__()
+        dims = [image_dim + text_dim] + list(hidden)
+        layers = []
+        for i in range(len(dims) - 1):
+            layers += [nn.Linear(dims[i], dims[i + 1]), nn.ReLU(), nn.Dropout(dropout)]
+        layers.append(nn.Linear(dims[-1], 1))
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, x):
+        return self.net(x).squeeze(-1)
+
+
+def pairwise_batch_loss(model, imgs, txts, criterion, num_negatives=4):
+    """One positive + `num_negatives` in-batch-shifted negatives per sample, in one forward pass.
+    Shift offsets 1..num_negatives are all distinct (mod batch size), so each negative caption is
+    a genuinely different mismatched caption, not a repeat.
+    """
+    b = imgs.shape[0]
+    assert num_negatives < b, "num_negatives must be smaller than the batch size"
+    pos_in = torch.cat([imgs, txts], dim=1)
+    neg_ins = [torch.cat([imgs, txts.roll(shifts=shift, dims=0)], dim=1)
+               for shift in range(1, num_negatives + 1)]
+    x = torch.cat([pos_in] + neg_ins, dim=0)
+    y = torch.cat([torch.ones(b), torch.zeros(b * num_negatives)]).to(imgs.device)
+    logits = model(x)
+    return criterion(logits, y)
+
+
+def train_early_fusion_mlp(train_loader, val_loader, device, image_dim=2048, text_dim=768,
+                            hidden=(512, 128), dropout=0.2, num_negatives=4, lr=1e-3,
+                            weight_decay=1e-4, max_epochs=20, patience=4, seed=None,
+                            verbose=True):
+    """Builds and trains an EarlyFusionScorer from scratch, early-stopping on validation loss
+    (Week 7 rule — not a fixed epoch count). Generalises notebook 03's inline training loop so
+    notebook 05 can retrain this exact technique (same architecture/hyperparameters already
+    decided in 03) without duplicating the loop a third time.
+
+    Returns (model, history, best_val_loss); `model` already has the best (restored) epoch's
+    weights loaded, and `history` is {"train_loss": [...], "val_loss": [...]}.
+    """
+    if seed is not None:
+        torch.manual_seed(seed); np.random.seed(seed); random.seed(seed)
+
+    model = EarlyFusionScorer(image_dim=image_dim, text_dim=text_dim, hidden=hidden,
+                               dropout=dropout).to(device)
+    opt = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+    # pos_weight rebalances the 1-positive-to-num_negatives-negatives ratio from pairwise_batch_loss.
+    criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor(float(num_negatives), device=device))
+
+    history = {"train_loss": [], "val_loss": []}
+    best_val_loss = float("inf")
+    bad_epochs = 0
+    best_state = None
+
+    for epoch in range(1, max_epochs + 1):
+        model.train()
+        train_losses = []
+        for imgs, txts in train_loader:
+            imgs, txts = imgs.to(device), txts.to(device)
+            opt.zero_grad()
+            loss = pairwise_batch_loss(model, imgs, txts, criterion, num_negatives=num_negatives)
+            loss.backward()
+            opt.step()
+            train_losses.append(loss.item())
+
+        model.eval()
+        val_losses = []
+        with torch.no_grad():
+            for imgs, txts in val_loader:
+                imgs, txts = imgs.to(device), txts.to(device)
+                val_losses.append(
+                    pairwise_batch_loss(model, imgs, txts, criterion,
+                                         num_negatives=num_negatives).item())
+
+        train_loss = sum(train_losses) / len(train_losses)
+        val_loss = sum(val_losses) / len(val_losses)
+        history["train_loss"].append(train_loss)
+        history["val_loss"].append(val_loss)
+        if verbose:
+            print(f"  epoch {epoch:2d}: train_loss={train_loss:.4f}  val_loss={val_loss:.4f}")
+
+        if val_loss < best_val_loss - 1e-4:
+            best_val_loss = val_loss
+            bad_epochs = 0
+            best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+        else:
+            bad_epochs += 1
+            if bad_epochs >= patience:
+                if verbose:
+                    print(f"  Early stopping at epoch {epoch} (best val_loss={best_val_loss:.4f}).")
+                break
+
+    model.load_state_dict(best_state)
+    return model, history, best_val_loss
+
+
+@torch.no_grad()
+def score_matrix_concat(model, image_feats, text_feats, device, q_chunk=128, c_chunk=512):
+    """Chunked GPU pairwise scorer for an early-fusion model that scores (image, caption) PAIRS
+    rather than producing standalone, independently-cacheable embeddings (see EarlyFusionScorer
+    above) — this means O(n*m) model calls instead of cosine_score_matrix's single matmul, which
+    is exactly the retrieval-time cost this project's efficiency comparison is built around.
+    Returns an (n, m) CPU score matrix of raw logits (not probabilities).
+    """
+    model.eval()
+    n, m = image_feats.shape[0], text_feats.shape[0]
+    scores = torch.empty(n, m)
+    image_feats = image_feats.to(device)
+    text_feats = text_feats.to(device)
+    for qs in range(0, n, q_chunk):
+        qe = min(qs + q_chunk, n)
+        img_block = image_feats[qs:qe]
+        for cs in range(0, m, c_chunk):
+            ce = min(cs + c_chunk, m)
+            txt_block = text_feats[cs:ce]
+            q, c = img_block.shape[0], txt_block.shape[0]
+            img_rep = img_block.unsqueeze(1).expand(q, c, img_block.shape[1]).reshape(q * c, -1)
+            txt_rep = txt_block.unsqueeze(0).expand(q, c, txt_block.shape[1]).reshape(q * c, -1)
+            logits = model(torch.cat([img_rep, txt_rep], dim=1)).view(q, c)
+            scores[qs:qe, cs:ce] = logits.cpu()
+    return scores
+
+
+# --- Contrastive dual encoder (technique 2, notebook 04) ----------------------------------
+# First defined inline in notebook 04, needed identically in notebook 05's final comparison —
+# moved here per this file's own rule.
+
+class ImageProjector(nn.Module):
+    """Projects frozen ResNet-50 features into the shared, L2-normalised contrastive embedding
+    space used by the dual encoder."""
+    def __init__(self, in_dim=2048, hidden=512, out_dim=256, dropout=0.1):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(in_dim, hidden), nn.ReLU(), nn.Dropout(dropout),
+            nn.Linear(hidden, out_dim),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
+class TextProjector(nn.Module):
+    """Projects frozen BERT features into the shared, L2-normalised contrastive embedding space
+    used by the dual encoder."""
+    def __init__(self, in_dim=768, hidden=512, out_dim=256, dropout=0.1):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(in_dim, hidden), nn.ReLU(), nn.Dropout(dropout),
+            nn.Linear(hidden, out_dim),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
+def train_dual_encoder(train_loader, val_loader, device, temperature=0.07, embed_dim=256,
+                        image_in_dim=2048, text_in_dim=768, hidden=512, dropout=0.1, lr=1e-3,
+                        max_epochs=30, patience=4, seed=None, verbose=True):
+    """Builds and jointly trains ImageProjector/TextProjector with info_nce (the Week 8 practical
+    formula). Early stopping within the run watches validation InfoNCE loss only (Week 7 rule).
+    Generalises notebook 04's inline training function (which closed over module-level globals)
+    so notebook 05 can retrain this exact technique (same architecture/temperature already
+    decided in 04's validation-Recall@10 sweep) without duplicating it a third time.
+
+    Returns (image_proj, text_proj, history, best_val_loss), with both heads' best (restored)
+    epoch weights already loaded.
+    """
+    if seed is not None:
+        torch.manual_seed(seed); np.random.seed(seed); random.seed(seed)
+
+    image_proj = ImageProjector(in_dim=image_in_dim, hidden=hidden, out_dim=embed_dim,
+                                 dropout=dropout).to(device)
+    text_proj = TextProjector(in_dim=text_in_dim, hidden=hidden, out_dim=embed_dim,
+                               dropout=dropout).to(device)
+    opt = torch.optim.Adam(list(image_proj.parameters()) + list(text_proj.parameters()), lr=lr)
+
+    history = {"train_loss": [], "val_loss": []}
+    best_val, best_epoch, bad_epochs = float("inf"), 0, 0
+    best_state = None
+
+    for epoch in range(1, max_epochs + 1):
+        image_proj.train(); text_proj.train()
+        train_losses = []
+        for imgs, txts in train_loader:
+            imgs, txts = imgs.to(device), txts.to(device)
+            opt.zero_grad()
+            img_emb = F.normalize(image_proj(imgs), dim=1)
+            txt_emb = F.normalize(text_proj(txts), dim=1)
+            loss = info_nce(img_emb, txt_emb, temperature=temperature)
+            loss.backward()
+            opt.step()
+            train_losses.append(loss.item())
+
+        image_proj.eval(); text_proj.eval()
+        val_losses = []
+        with torch.no_grad():
+            for imgs, txts in val_loader:
+                imgs, txts = imgs.to(device), txts.to(device)
+                img_emb = F.normalize(image_proj(imgs), dim=1)
+                txt_emb = F.normalize(text_proj(txts), dim=1)
+                val_losses.append(info_nce(img_emb, txt_emb, temperature=temperature).item())
+
+        train_loss = sum(train_losses) / len(train_losses)
+        val_loss = sum(val_losses) / len(val_losses)
+        history["train_loss"].append(train_loss)
+        history["val_loss"].append(val_loss)
+        if verbose:
+            print(f"  epoch {epoch:2d}: train_loss={train_loss:.4f}  val_loss={val_loss:.4f}")
+
+        if val_loss < best_val - 1e-4:
+            best_val, best_epoch, bad_epochs = val_loss, epoch, 0
+            best_state = {
+                "image_proj": {k: v.detach().cpu().clone() for k, v in image_proj.state_dict().items()},
+                "text_proj": {k: v.detach().cpu().clone() for k, v in text_proj.state_dict().items()},
+            }
+        else:
+            bad_epochs += 1
+            if bad_epochs >= patience:
+                if verbose:
+                    print(f"  Early stopping at epoch {epoch} "
+                          f"(best val_loss={best_val:.4f} at epoch {best_epoch}).")
+                break
+
+    image_proj.load_state_dict(best_state["image_proj"])
+    text_proj.load_state_dict(best_state["text_proj"])
+    return image_proj, text_proj, history, best_val
+
+
+# --- Shared evaluation/data helpers (notebook 05 onward) ----------------------------------
+# Each of these was informally reinvented inline more than once (03/04) — consolidated here
+# the next time (05) they're needed, per this file's own rule.
+
+def standardize_features(data, splits=("train", "val", "test"), fit_split="train"):
+    """Returns a NEW dict with image/text features standardised using `fit_split`'s mean/std
+    (train-only statistics, per the Week 7 rule), WITHOUT mutating `data`.
+
+    This matters starting with notebook 05: the dual encoder needs the original, un-standardised
+    features at the same time Ridge/the early-fusion MLP need standardised ones. Notebook 03's
+    original standardisation mutated `data` in place, which only worked there because that
+    notebook never needed both versions to coexist.
+
+    Each split's dict is shallow-copied — screenId/flat_df/eval_df are shared by reference, since
+    they are not modified — with image_features/flat_text_features/eval_text_features replaced by
+    standardised copies.
+    """
+    img_mu = data[fit_split]["image_features"].mean(0, keepdim=True)
+    img_sd = data[fit_split]["image_features"].std(0, keepdim=True).clamp(min=1e-6)
+    txt_mu = data[fit_split]["flat_text_features"].mean(0, keepdim=True)
+    txt_sd = data[fit_split]["flat_text_features"].std(0, keepdim=True).clamp(min=1e-6)
+
+    standardized = {}
+    for split_name in splits:
+        d = data[split_name]
+        new_d = dict(d)  # shallow copy: screenId/flat_df/eval_df untouched, shared by reference
+        new_d["image_features"] = (d["image_features"] - img_mu) / img_sd
+        new_d["flat_text_features"] = (d["flat_text_features"] - txt_mu) / txt_sd
+        new_d["eval_text_features"] = (d["eval_text_features"] - txt_mu) / txt_sd
+        standardized[split_name] = new_d
+    return standardized
+
+
+def subsample_idx(n_total, max_n, seed=0):
+    """Row indices for a reproducible random subsample of size `max_n` out of `n_total` (or all
+    `n_total` indices, in original order, if `max_n` is None or already >= n_total). Consolidates
+    the informal version each of notebooks 03/04 reinvented inline for capping expensive train-set
+    evaluation.
+    """
+    if max_n is None or n_total <= max_n:
+        return torch.arange(n_total)
+    g = torch.Generator().manual_seed(seed)
+    return torch.randperm(n_total, generator=g)[:max_n]
+
+
+# --- Plotting helpers (notebook 05 onward) -------------------------------------------------
+# The loss-curve figure (03, 04) and the score-heatmap figure (01, 03, 04) have each now been
+# hand-written three times; notebook 05 needing them a third/fourth time is exactly the trigger
+# this file's own module docstring describes for moving something here instead.
+
+def plot_loss_curve(history, title, save_path, ylabel="loss"):
+    """Train-vs-validation loss curve with the restored best (lowest val-loss) epoch marked —
+    same figure used by notebooks 03 and 04's training loops."""
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    epochs = range(1, len(history["train_loss"]) + 1)
+    best_epoch = int(np.argmin(history["val_loss"])) + 1
+    ax.plot(epochs, history["train_loss"], label="train loss")
+    ax.plot(epochs, history["val_loss"], label="val loss")
+    ax.axvline(best_epoch, color="gray", linestyle="--", alpha=0.5,
+               label=f"best epoch ({best_epoch}, restored)")
+    ax.set_xlabel("Epoch"); ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    return fig
+
+
+def plot_score_heatmap(scores, title, save_path, n_show=40, cbar_label="score"):
+    """Score-matrix heatmap diagnostic (first `n_show` rows/columns only, so the diagonal match
+    pattern is actually visible) — same figure used by notebooks 01, 03 and 04."""
+    fig, ax = plt.subplots(figsize=(6, 5))
+    im = ax.imshow(scores[:n_show, :n_show], cmap="viridis")
+    ax.set_title(title)
+    ax.set_xlabel("Caption index"); ax.set_ylabel("Image index")
+    fig.colorbar(im, ax=ax, label=cbar_label)
+    fig.tight_layout()
+    fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    return fig
