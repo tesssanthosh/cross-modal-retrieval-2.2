@@ -44,10 +44,9 @@ The dataset is downloaded automatically by `notebooks/01_data_exploration.ipynb`
 ├── notebooks/
 │   ├── 01_data_exploration.ipynb      <- load data, quality checks, visualisation
 │   ├── 02_preprocessing_features.ipynb<- cleaning, splits, feature extraction (ResNet-50 / BERT)
-│   ├── 03_early_fusion.ipynb          <- technique 1: early fusion (concatenate + project)
-│   ├── 04_contrastive_fusion.ipynb    <- technique 2: coordinated / contrastive (InfoNCE)
-│   ├── 05_attention_fusion.ipynb      <- (optional) technique 3: cross-attention fusion
-│   └── 06_evaluation_comparison.ipynb <- metrics, comparison table, overfitting check, failure cases
+│   ├── 03_early_fusion.ipynb          <- technique 1: Ridge regression baseline + early fusion (MLP)
+│   ├── 04_contrastive_fusion.ipynb    <- technique 2: coordinated / contrastive dual encoder (InfoNCE)
+│   └── 05_evaluation_comparison.ipynb <- metrics, comparison table, overfitting check, failure cases
 ├── src/
 │   └── utils.py                       <- shared functions: metrics (Recall@K, AUC), plotting, data loading
 ├── results/
@@ -63,17 +62,23 @@ The dataset is downloaded automatically by `notebooks/01_data_exploration.ipynb`
    ```bash
    pip install -r requirements.txt
    ```
-2. **Run the notebooks in order**, 01 through 06. Each notebook saves what the next one needs
-   (features, split indices, trained weights) into `results/` or a local cache, so they must be run
-   in sequence the first time.
+2. **Run the notebooks in order**, 01 through 05. Each notebook is independently runnable — rather
+   than saving and loading model checkpoints between notebooks, every notebook re-extracts the
+   frozen ResNet-50/BERT features and retrains its own (fast, lightweight) head(s) from scratch via
+   the shared functions in `src/utils.py`. What persists between notebooks is each one's *results*
+   (metrics CSVs, figures) in `results/`, not trained weights — model files are git-ignored and
+   regenerable, per `.gitignore`.
    - `01_data_exploration.ipynb` — downloads RICO-Screen2Words, explores size/quality/class balance.
-   - `02_preprocessing_features.ipynb` — cleans captions, creates the train/val/test split
-     (grouped by app to avoid near-duplicate leakage — see report Section X), extracts frozen
-     ResNet-50 image features and BERT text features.
-   - `03_early_fusion.ipynb` / `04_contrastive_fusion.ipynb` / `05_attention_fusion.ipynb` —
-     train each fusion technique and save its checkpoint + validation metrics.
-   - `06_evaluation_comparison.ipynb` — loads all trained models, computes the full metric suite
-     on the held-out test set, produces the comparison table and figures used in the report.
+   - `02_preprocessing_features.ipynb` — cleans captions, confirms the official train/val/test split
+     is already app-disjoint (verified, not assumed — see the notebook), extracts frozen ResNet-50
+     image features and BERT text features.
+   - `03_early_fusion.ipynb` — Ridge regression baseline and an early-fusion MLP (concatenate +
+     project), both evaluated with Recall@K/AUC.
+   - `04_contrastive_fusion.ipynb` — the contrastive dual encoder (InfoNCE), the project's
+     best-performing technique, with a direct efficiency comparison against early fusion.
+   - `05_evaluation_comparison.ipynb` — combines all three techniques' saved results into the
+     final comparison table and figures used in the report, plus the overfitting check and
+     specific failure-case examples.
 3. **Expected runtime:** <fill in once timed, e.g. "~25 minutes end-to-end on a Colab T4">.
 
 ## Evaluation methodology
