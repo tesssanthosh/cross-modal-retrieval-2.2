@@ -21,21 +21,51 @@ from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
 
-def recall_at_k(scores: torch.Tensor, k: int) -> float:
-    """Fraction of queries (rows) whose correct candidate (the diagonal) is in the top k.
-    `scores` is a square (n_queries, n_candidates) matrix; row i's correct answer is column i.
-    Same approach as Week 7/8: rank = how many wrong candidates outscore the right one.
+def rank_of_correct(scores: torch.Tensor) -> torch.Tensor:
+    """0-indexed rank of each query's correct candidate (the diagonal) — how many wrong candidates
+    outscore it. `scores` is a square (n_queries, n_candidates) matrix; row i's correct answer is
+    column i. Same approach as Week 7/8. Shared by recall_at_k, mean_reciprocal_rank, median_rank,
+    and the failure-case ranking in notebook 05, instead of recomputing it separately each time.
     """
-    ranks = (scores > scores.diag().unsqueeze(1)).sum(dim=1)
+    return (scores > scores.diag().unsqueeze(1)).sum(dim=1)
+
+
+def recall_at_k(scores: torch.Tensor, k: int) -> float:
+    """Fraction of queries (rows) whose correct candidate is in the top k."""
+    ranks = rank_of_correct(scores)
     return (ranks < k).float().mean().item()
 
 
+def mean_reciprocal_rank(scores: torch.Tensor) -> float:
+    """Mean of 1/(1-indexed rank) over all queries — 1.0 when the correct candidate is always
+    ranked first, smaller the further down it typically falls. Promised in the Project 2.1
+    proposal (Section 9) alongside Recall@K and median rank.
+    """
+    ranks = rank_of_correct(scores)
+    return (1.0 / (ranks.float() + 1.0)).mean().item()
+
+
+def median_rank(scores: torch.Tensor) -> float:
+    """Median 1-indexed rank of the correct candidate (1 = always retrieved first). Reported
+    alongside mean_reciprocal_rank for the same reason — median rank is far less sensitive to a
+    handful of very bad failure cases than the mean would be, so the two together give a fuller
+    picture than either alone.
+    """
+    ranks = rank_of_correct(scores)
+    return (ranks.float() + 1.0).median().item()
+
+
 def retrieval_report(scores: torch.Tensor, ks=(1, 5, 10)) -> dict:
-    """Recall@K in both directions plus AUC, matching the Week 7/8 metric suite."""
+    """Recall@K in both directions, MRR, median rank, and AUC — the Week 7/8 metric suite plus the
+    MRR/median-rank commitment from the Project 2.1 proposal."""
     out = {}
     for k in ks:
         out[f"R@{k} image->text"] = recall_at_k(scores, k)
         out[f"R@{k} text->image"] = recall_at_k(scores.T, k)
+    out["MRR image->text"] = mean_reciprocal_rank(scores)
+    out["MRR text->image"] = mean_reciprocal_rank(scores.T)
+    out["median_rank image->text"] = median_rank(scores)
+    out["median_rank text->image"] = median_rank(scores.T)
     is_match = torch.eye(len(scores)).flatten().numpy()
     out["AUC"] = roc_auc_score(is_match, scores.flatten().detach().cpu().numpy())
     return out
@@ -111,26 +141,37 @@ def extract_resnet50_features(images, resnet, preprocess, device, batch_size: in
 
 @torch.no_grad()
 def extract_bert_features(texts, bert, tokenizer, device, batch_size: int = 128,
-                           max_length: int = 32, show_progress: bool = True):
-    """Frozen, attention-mask-weighted mean-pooled BERT features (768-d) for a list of strings.
+                           max_length: int = 32, show_progress: bool = True, pooling: str = "mean"):
+    """Frozen BERT features (768-d) for a list of strings, pooled per `pooling`.
 
-    Mean pooling over real (non-padding) tokens is used instead of the [CLS] vector — it's the
-    more standard choice for a frozen, not-fine-tuned BERT used as a sentence encoder.
+    `pooling="mean"` (the default, used everywhere in this project except the notebook 05 ablation
+    that calls this with `pooling="cls"`): attention-mask-weighted mean over real (non-padding)
+    tokens — the more standard choice for a frozen, not-fine-tuned BERT used as a sentence encoder.
+    `pooling="cls"`: the first token's ([CLS]) hidden state instead — kept as an option specifically
+    so notebook 05's mean-vs-CLS ablation (Project 2.1 proposal, Section 8/9) can get both from this
+    one function without a second implementation; it costs no extra BERT forward pass when compared
+    for the SAME batch of texts (`out` already holds every token's hidden state either way), only
+    when called a second time for a different pooling choice, as the ablation does.
     `bert`/`tokenizer` come from build_bert_backbone(). Returns (features, elapsed_seconds), a
     (N, 768) float32 CPU tensor in the same order as `texts`.
     """
+    if pooling not in ("mean", "cls"):
+        raise ValueError(f"Unknown pooling {pooling!r} — expected 'mean' or 'cls'.")
     feats = []
     t0 = time.time()
     rng = range(0, len(texts), batch_size)
     if show_progress:
-        rng = tqdm(rng, desc="BERT features")
+        rng = tqdm(rng, desc=f"BERT features ({pooling} pooling)")
     for start in rng:
         batch = texts[start:start + batch_size]
         enc = tokenizer(batch, padding=True, truncation=True, max_length=max_length,
                          return_tensors="pt").to(device)
         out = bert(**enc).last_hidden_state  # (B, T, 768)
-        mask = enc["attention_mask"].unsqueeze(-1).float()  # (B, T, 1)
-        pooled = (out * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1e-9)
+        if pooling == "cls":
+            pooled = out[:, 0, :]
+        else:
+            mask = enc["attention_mask"].unsqueeze(-1).float()  # (B, T, 1)
+            pooled = (out * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1e-9)
         feats.append(pooled.float().cpu())
     elapsed = time.time() - t0
     return torch.cat(feats, dim=0), elapsed
