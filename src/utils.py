@@ -214,5 +214,38 @@ def cosine_score_matrix(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     return a @ b.T
 
 
+# --- Training-pair dataset ---------------------------------------------------------------
+# First used in notebook 03 (defined inline there), now needed identically in notebook 04 —
+# moved here per this file's own rule.
+
+def build_screen_idx(data: dict) -> dict:
+    """screenId -> row-index lookup per split, from load_rico_splits_with_features's output."""
+    return {split_name: {int(sid): i for i, sid in enumerate(d["screenId"].tolist())}
+            for split_name, d in data.items()}
+
+
+class PairDataset(torch.utils.data.Dataset):
+    """One row per (image, caption) training pair, image repeated across its ~5 captions.
+
+    `flat_df`/`text_features` are a split's flat_df/flat_text_features from
+    load_rico_splits_with_features (one row per caption); `image_features` is that split's
+    per-screen image features; `screen_idx` is that split's entry from build_screen_idx(data).
+    """
+    def __init__(self, flat_df, image_features, text_features, screen_idx):
+        self.flat_df = flat_df.reset_index(drop=True)
+        self.image_features = image_features
+        self.text_features = text_features
+        self.screen_idx = screen_idx
+
+    def __len__(self):
+        return len(self.flat_df)
+
+    def __getitem__(self, i):
+        screen_id = int(self.flat_df.iloc[i]["screenId"])
+        img = self.image_features[self.screen_idx[screen_id]]
+        txt = self.text_features[i]
+        return img, txt
+
+
 # TODO: add your plotting helpers here too (score heatmap, training curves) once you've
 # written them once in a notebook — move them here the second time you need them elsewhere.
