@@ -1,4 +1,4 @@
-# Exact versions used
+# core dependencies
 torch
 torchvision
 transformers
