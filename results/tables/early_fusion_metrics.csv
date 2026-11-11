@@ -1,0 +1,6 @@
+technique,split,R@1 image->text,R@1 text->image,R@5 image->text,R@5 text->image,R@10 image->text,R@10 text->image,AUC image->text,AUC text->image,AUC,n_screens_scored,n_pairs_scored,scoring_time_sec,ms_per_pair
+Ridge regression (baseline),val,0.008037,0.009306,0.032149,0.032149,0.05203,0.050338,0.722101,0.716148,,,,,
+Ridge regression (baseline),test,0.005568,0.006497,0.019954,0.024362,0.032947,0.038515,0.722785,0.710851,,,,,
+Early fusion (MLP),train_subsample_2000,0.0075,0.006,0.037,0.03,0.068,0.0565,,,0.82211,2000.0,4000000.0,3.77,0.0009
+Early fusion (MLP),val,0.008037,0.006345,0.027496,0.023266,0.050338,0.045262,,,0.788493,2364.0,5588496.0,5.26,0.0009
+Early fusion (MLP),test,0.004176,0.00348,0.017401,0.016009,0.03109,0.02645,,,0.792747,4310.0,18576100.0,17.54,0.0009

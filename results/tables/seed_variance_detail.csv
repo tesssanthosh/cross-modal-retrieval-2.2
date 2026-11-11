@@ -1,0 +1,7 @@
+technique,seed,train_time_sec,test_R@10 image->text,test_R@10 text->image,test_MRR image->text,test_MRR text->image
+Early fusion (MLP),42,30.75,0.029466,0.027842,0.015353,0.015016
+Early fusion (MLP),123,30.58,0.028306,0.029466,0.015444,0.015597
+Early fusion (MLP),2024,29.93,0.030858,0.027146,0.015781,0.016013
+Contrastive dual encoder,42,30.9,0.054988,0.057541,0.026697,0.029418
+Contrastive dual encoder,123,25.25,0.042923,0.041531,0.022049,0.022089
+Contrastive dual encoder,2024,29.79,0.059861,0.060557,0.027352,0.02888

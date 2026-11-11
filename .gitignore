@@ -8,4 +8,4 @@ __pycache__/
 .DS_Store
 data/
 *.zip
-# Keep results CSVs and figures (small, needed for the report) — only exclude raw caches above
+# results CSVs and figures are small and still tracked, only the raw caches above are excluded

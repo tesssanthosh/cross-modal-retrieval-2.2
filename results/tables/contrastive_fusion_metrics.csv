@@ -1,0 +1,4 @@
+technique,split,R@1 image->text,R@1 text->image,R@5 image->text,R@5 text->image,R@10 image->text,R@10 text->image,AUC,n_screens_scored,n_pairs_scored,encode_plus_scoring_time_sec,us_per_pair
+Contrastive dual encoder,train,0.023,0.0222,0.0844,0.0778,0.133,0.1258,0.913935,5000,25000000,12.975,0.519
+Contrastive dual encoder,val,0.020305,0.019459,0.064721,0.055838,0.100677,0.095601,0.828748,2364,5588496,2.098,0.3754
+Contrastive dual encoder,test,0.007425,0.009745,0.031787,0.037819,0.054988,0.057541,0.827628,4310,18576100,8.545,0.46

@@ -1,0 +1,3 @@
+backbone,parameters
+ResNet-50 (frozen image encoder),23508032
+BERT-base-uncased (frozen text encoder),109482240

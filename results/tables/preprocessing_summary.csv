@@ -1,0 +1,4 @@
+split,n_screens,n_captions,image_feature_dim,text_feature_dim,image_extraction_sec,text_extraction_sec
+train,15743,78715,2048,768,343.8,62.8
+val,2364,11820,2048,768,50.2,9.3
+test,4310,21550,2048,768,93.5,17.3

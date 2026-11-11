@@ -1,0 +1,3 @@
+pooling,val_R@10_image->text,val_R@10_text->image
+mean (used throughout this project),0.05203,0.050338
+[CLS] token,0.038071,0.041455

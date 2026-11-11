@@ -1,0 +1,2 @@
+model,trainable_parameters,embedding_dim,selected_temperature,ms_per_query_precomputed_index
+Contrastive dual encoder (image + text project...,1705472,256,0.07,1.3227

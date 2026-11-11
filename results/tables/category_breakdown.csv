@@ -1,0 +1,28 @@
+category,n_screens,recall_at_10
+Social,333,0.045045
+Travel & Local,325,0.055385
+Entertainment,313,0.060703
+Communication,292,0.037671
+Lifestyle,269,0.078067
+Shopping,243,0.069959
+Sports,242,0.07438
+Education,233,0.034335
+Health & Fitness,230,0.052174
+Finance,189,0.026455
+Business,173,0.023121
+Books & Reference,168,0.041667
+Maps & Navigation,168,0.029762
+News & Magazines,166,0.072289
+Dating,147,0.102041
+Music & Audio,123,0.04065
+Weather,119,0.092437
+Medical,104,0.038462
+Food & Drink,97,0.092784
+Video Players & Editors,88,0.068182
+Parenting,73,0.027397
+Auto & Vehicles,69,0.043478
+Comics,49,0.040816
+Beauty,37,0.135135
+House & Home,31,0.096774
+Art & Design,22,0.0
+Events,7,0.0

@@ -1,0 +1,2 @@
+total_screens,total_captions_dataset,mean_caption_length_words,pct_exact_duplicate_captions_sampled,corrupt_images_in_sample,identical_dhash_image_pairs_sampled,near_duplicate_dhash_image_pairs_sampled,pct_screens_in_dhash_dup_or_near_dup_sampled,unique_apps
+22417,112085,6.55,6.4,0,0,3,1.2,4390

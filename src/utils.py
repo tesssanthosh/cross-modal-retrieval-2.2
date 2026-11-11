@@ -1,10 +1,5 @@
-"""
-Shared utilities for the cross-modal retrieval project.
-
-Import these from every notebook instead of redefining them — this is what the rubric means by
-"modularity" (Criteria 6). Fill in each function as you build the corresponding notebook; the
-signatures below follow the pattern used in the Week 7/8 practicals (score matrix in, metrics out).
-"""
+# Shared utilities for the cross-modal retrieval project
+# Metrics, feature extraction, model definitions, training loops, and plotting used across the notebooks
 
 import random
 import re
@@ -21,43 +16,31 @@ from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
 
+# Ranks the correct candidate for each query (row i's correct answer is column i)
 def rank_of_correct(scores: torch.Tensor) -> torch.Tensor:
-    """0-indexed rank of each query's correct candidate (the diagonal) — how many wrong candidates
-    outscore it. `scores` is a square (n_queries, n_candidates) matrix; row i's correct answer is
-    column i. Same approach as Week 7/8. Shared by recall_at_k, mean_reciprocal_rank, median_rank,
-    and the failure-case ranking in notebook 05, instead of recomputing it separately each time.
-    """
     return (scores > scores.diag().unsqueeze(1)).sum(dim=1)
 
 
+# Checks if the correct candidate is in the top k, for each query
 def recall_at_k(scores: torch.Tensor, k: int) -> float:
-    """Fraction of queries (rows) whose correct candidate is in the top k."""
     ranks = rank_of_correct(scores)
     return (ranks < k).float().mean().item()
 
 
+# Averages 1/rank over all queries
 def mean_reciprocal_rank(scores: torch.Tensor) -> float:
-    """Mean of 1/(1-indexed rank) over all queries — 1.0 when the correct candidate is always
-    ranked first, smaller the further down it typically falls. Promised in the Project 2.1
-    proposal (Section 9) alongside Recall@K and median rank.
-    """
     ranks = rank_of_correct(scores)
     return (1.0 / (ranks.float() + 1.0)).mean().item()
 
 
+# Finds the median rank of the correct candidate (1 = always retrieved first)
 def median_rank(scores: torch.Tensor) -> float:
-    """Median 1-indexed rank of the correct candidate (1 = always retrieved first). Reported
-    alongside mean_reciprocal_rank for the same reason — median rank is far less sensitive to a
-    handful of very bad failure cases than the mean would be, so the two together give a fuller
-    picture than either alone.
-    """
     ranks = rank_of_correct(scores)
     return (ranks.float() + 1.0).median().item()
 
 
+# Builds a report of Recall@K, MRR, median rank, and AUC for a score matrix
 def retrieval_report(scores: torch.Tensor, ks=(1, 5, 10)) -> dict:
-    """Recall@K in both directions, MRR, median rank, and AUC — the Week 7/8 metric suite plus the
-    MRR/median-rank commitment from the Project 2.1 proposal."""
     out = {}
     for k in ks:
         out[f"R@{k} image->text"] = recall_at_k(scores, k)
@@ -71,10 +54,8 @@ def retrieval_report(scores: torch.Tensor, ks=(1, 5, 10)) -> dict:
     return out
 
 
+# Computes the symmetric InfoNCE loss between L2-normalised image and text embeddings
 def info_nce(image_embeddings: torch.Tensor, text_embeddings: torch.Tensor, temperature: float = 0.07):
-    """Symmetric InfoNCE loss for a contrastive dual encoder (Week 8 practical).
-    Both inputs must be L2-normalised, shape (batch, dim); row i of each is the same pair.
-    """
     logits = image_embeddings @ text_embeddings.T / temperature
     targets = torch.arange(len(logits), device=logits.device)
     return (F.cross_entropy(logits, targets) + F.cross_entropy(logits.T, targets)) / 2
@@ -84,29 +65,23 @@ def count_parameters(model) -> int:
     return sum(p.numel() for p in model.parameters())
 
 
-# --- Frozen backbone feature extraction -------------------------------------------------
-# Used by 02 (to build the cached features), then reused as-is by 03/04 (fusion training)
-# and 06 (evaluation) so every notebook extracts features the exact same way. Defined once
-# here instead of copy-pasted, per this file's own "modularity" rule above.
+# Frozen model feature extraction, used by notebooks 02 to 05.
 
+# Loads a frozen ImageNet-pretrained ResNet-50 with the classification head removed
 def build_resnet50_backbone(device):
-    """ImageNet-pretrained ResNet-50 with its classification head removed, frozen, eval mode.
-    Returns (backbone, preprocess) where `preprocess` is the exact transform that matches the
-    pretrained weights (resize/crop/normalise) — always use it, don't hand-roll your own.
-    """
     from torchvision.models import resnet50, ResNet50_Weights
 
     weights = ResNet50_Weights.IMAGENET1K_V2
     model = resnet50(weights=weights)
-    model.fc = torch.nn.Identity()  # drop the 1000-way classifier; keep the 2048-d pooled features
+    model.fc = torch.nn.Identity()  # drop the classifier and keep the 2048-d pooled features
     model.eval().to(device)
     for p in model.parameters():
         p.requires_grad_(False)
     return model, weights.transforms()
 
 
+# Loads a frozen pretrained BERT encoder and tokenizer
 def build_bert_backbone(device, model_name: str = "bert-base-uncased"):
-    """Pretrained BERT encoder + tokenizer, frozen, eval mode."""
     from transformers import AutoTokenizer, AutoModel
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -117,14 +92,10 @@ def build_bert_backbone(device, model_name: str = "bert-base-uncased"):
     return model, tokenizer
 
 
+# Extracts frozen ResNet-50 features (2048-d) for a sequence of images
 @torch.no_grad()
 def extract_resnet50_features(images, resnet, preprocess, device, batch_size: int = 64,
                                show_progress: bool = True):
-    """Frozen, globally-average-pooled ResNet-50 features (2048-d) for a sequence of PIL images.
-
-    `resnet`/`preprocess` come from build_resnet50_backbone(). Returns (features, elapsed_seconds)
-    where features is a (N, 2048) float32 CPU tensor in the same order as `images`.
-    """
     feats = []
     t0 = time.time()
     rng = range(0, len(images), batch_size)
@@ -139,24 +110,12 @@ def extract_resnet50_features(images, resnet, preprocess, device, batch_size: in
     return torch.cat(feats, dim=0), elapsed
 
 
+# Extracts frozen BERT features (768-d) for a list of strings, mean or [CLS] pooled
 @torch.no_grad()
 def extract_bert_features(texts, bert, tokenizer, device, batch_size: int = 128,
                            max_length: int = 32, show_progress: bool = True, pooling: str = "mean"):
-    """Frozen BERT features (768-d) for a list of strings, pooled per `pooling`.
-
-    `pooling="mean"` (the default, used everywhere in this project except the notebook 05 ablation
-    that calls this with `pooling="cls"`): attention-mask-weighted mean over real (non-padding)
-    tokens — the more standard choice for a frozen, not-fine-tuned BERT used as a sentence encoder.
-    `pooling="cls"`: the first token's ([CLS]) hidden state instead — kept as an option specifically
-    so notebook 05's mean-vs-CLS ablation (Project 2.1 proposal, Section 8/9) can get both from this
-    one function without a second implementation; it costs no extra BERT forward pass when compared
-    for the SAME batch of texts (`out` already holds every token's hidden state either way), only
-    when called a second time for a different pooling choice, as the ablation does.
-    `bert`/`tokenizer` come from build_bert_backbone(). Returns (features, elapsed_seconds), a
-    (N, 768) float32 CPU tensor in the same order as `texts`.
-    """
     if pooling not in ("mean", "cls"):
-        raise ValueError(f"Unknown pooling {pooling!r} — expected 'mean' or 'cls'.")
+        raise ValueError(f"Unknown pooling {pooling!r} - expected 'mean' or 'cls'.")
     feats = []
     t0 = time.time()
     rng = range(0, len(texts), batch_size)
@@ -177,36 +136,17 @@ def extract_bert_features(texts, bert, tokenizer, device, batch_size: int = 128,
     return torch.cat(feats, dim=0), elapsed
 
 
-# --- Full dataset + feature loader -------------------------------------------------------
-# Notebook 02 builds these features inline (that notebook's job is specifically to build and
-# cache them). From notebook 03 onwards, three different notebooks (03, 04, 06) need the exact
-# same features, so — per this file's own rule — the logic is written once here instead of
-# copy-pasted a third time. It intentionally mirrors notebook 02's logic exactly.
+# Full dataset and feature loader 
+# Used by notebooks 03, 04 and 05.
 
 def clean_caption(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+# Loads RICO-Screen2Words and extracts frozen ResNet-50 / BERT features for each split
 def load_rico_splits_with_features(device, splits=("train", "val", "test"),
                                     image_batch_size: int = 64, text_batch_size: int = 128,
                                     show_progress: bool = True):
-    """Loads RICO-Screen2Words and extracts frozen ResNet-50 / BERT features for each split.
-
-    Returns (data, resnet, bert) where `data` is a dict keyed by split name, each value a dict:
-      - screenId:            (N,) tensor, one entry per screen
-      - image_features:      (N, 2048) tensor, one row per screen, same order as screenId
-      - flat_df:              DataFrame, one row per (screenId, caption) — all ~5 captions/screen,
-                              columns: screenId, caption_idx, caption, app_package_name, category
-      - flat_text_features:  (M, 768) tensor aligned row-for-row with flat_df (M = len(flat_df))
-      - eval_df:              DataFrame, one row per screen (caption_idx == 0 only), in the SAME
-                              row order as image_features/screenId — i.e. eval_df.iloc[i] and
-                              image_features[i] describe the same screen.
-      - eval_text_features:  (N, 768) tensor, flat_text_features filtered to caption_idx == 0,
-                              aligned row-for-row with eval_df and image_features.
-
-    `resnet`/`bert` are returned too since 03/04 train small heads on top of these same frozen
-    backbones (no need to reload them separately).
-    """
     from datasets import load_dataset
 
     ds = load_dataset("rootsautomation/RICO-Screen2Words")
@@ -253,30 +193,24 @@ def load_rico_splits_with_features(device, splits=("train", "val", "test"),
     return data, resnet, bert
 
 
+# Computes a row-normalised cosine similarity matrix
 def cosine_score_matrix(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    """Row-normalised cosine similarity matrix: result[i, j] = cosine(a[i], b[j])."""
     a = a / a.norm(dim=1, keepdim=True).clamp(min=1e-9)
     b = b / b.norm(dim=1, keepdim=True).clamp(min=1e-9)
     return a @ b.T
 
 
-# --- Training-pair dataset ---------------------------------------------------------------
-# First used in notebook 03 (defined inline there), now needed identically in notebook 04 —
-# moved here per this file's own rule.
+# Training-pair dataset 
+# Used by notebooks 04 and 05
 
+# Builds a screenId to row-index lookup per split
 def build_screen_idx(data: dict) -> dict:
-    """screenId -> row-index lookup per split, from load_rico_splits_with_features's output."""
     return {split_name: {int(sid): i for i, sid in enumerate(d["screenId"].tolist())}
             for split_name, d in data.items()}
 
 
+# One row per (image, caption) training pair, each image repeated across its ~5 captions
 class PairDataset(torch.utils.data.Dataset):
-    """One row per (image, caption) training pair, image repeated across its ~5 captions.
-
-    `flat_df`/`text_features` are a split's flat_df/flat_text_features from
-    load_rico_splits_with_features (one row per caption); `image_features` is that split's
-    per-screen image features; `screen_idx` is that split's entry from build_screen_idx(data).
-    """
     def __init__(self, flat_df, image_features, text_features, screen_idx):
         self.flat_df = flat_df.reset_index(drop=True)
         self.image_features = image_features
@@ -293,18 +227,10 @@ class PairDataset(torch.utils.data.Dataset):
         return img, txt
 
 
-# --- Early fusion (technique 1, notebook 03) ---------------------------------------------
-# First defined inline in notebook 03, needed identically (model + training loop + the
-# pairwise-scoring workaround for not having a standalone embedding) in notebook 05's final
-# comparison — moved here per this file's own rule.
+# Early fusion (technique 1, notebook 03), also used by notebook 05
 
+# Concatenates image and caption embeddings, scores the pair with a small MLP
 class EarlyFusionScorer(nn.Module):
-    """Concatenate [image_embedding ; caption_embedding] then score the pair with a small MLP
-    ("early fusion" — the two modalities are combined before a single network ever sees them,
-    unlike the dual encoder's late fusion via a dot product). Outputs one scalar logit per pair;
-    there is no standalone embedding to cache, which is the architectural root of this
-    technique's retrieval-time cost (see score_matrix_concat below).
-    """
     def __init__(self, image_dim=2048, text_dim=768, hidden=(512, 128), dropout=0.2):
         super().__init__()
         dims = [image_dim + text_dim] + list(hidden)
@@ -318,11 +244,8 @@ class EarlyFusionScorer(nn.Module):
         return self.net(x).squeeze(-1)
 
 
+# Builds one positive pair plus num_negatives in-batch negatives per sample, in one pass
 def pairwise_batch_loss(model, imgs, txts, criterion, num_negatives=4):
-    """One positive + `num_negatives` in-batch-shifted negatives per sample, in one forward pass.
-    Shift offsets 1..num_negatives are all distinct (mod batch size), so each negative caption is
-    a genuinely different mismatched caption, not a repeat.
-    """
     b = imgs.shape[0]
     assert num_negatives < b, "num_negatives must be smaller than the batch size"
     pos_in = torch.cat([imgs, txts], dim=1)
@@ -334,25 +257,18 @@ def pairwise_batch_loss(model, imgs, txts, criterion, num_negatives=4):
     return criterion(logits, y)
 
 
+# Builds and trains an EarlyFusionScorer from scratch, with early stopping on validation loss
 def train_early_fusion_mlp(train_loader, val_loader, device, image_dim=2048, text_dim=768,
                             hidden=(512, 128), dropout=0.2, num_negatives=4, lr=1e-3,
                             weight_decay=1e-4, max_epochs=20, patience=4, seed=None,
                             verbose=True):
-    """Builds and trains an EarlyFusionScorer from scratch, early-stopping on validation loss
-    (Week 7 rule — not a fixed epoch count). Generalises notebook 03's inline training loop so
-    notebook 05 can retrain this exact technique (same architecture/hyperparameters already
-    decided in 03) without duplicating the loop a third time.
-
-    Returns (model, history, best_val_loss); `model` already has the best (restored) epoch's
-    weights loaded, and `history` is {"train_loss": [...], "val_loss": [...]}.
-    """
     if seed is not None:
         torch.manual_seed(seed); np.random.seed(seed); random.seed(seed)
 
     model = EarlyFusionScorer(image_dim=image_dim, text_dim=text_dim, hidden=hidden,
                                dropout=dropout).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
-    # pos_weight rebalances the 1-positive-to-num_negatives-negatives ratio from pairwise_batch_loss.
+    # pos_weight balances the 1-positive vs num_negatives-negative ratio
     criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor(float(num_negatives), device=device))
 
     history = {"train_loss": [], "val_loss": []}
@@ -402,14 +318,9 @@ def train_early_fusion_mlp(train_loader, val_loader, device, image_dim=2048, tex
     return model, history, best_val_loss
 
 
+# Scores every (image, caption) pair between two sets of features, in chunks on the GPU
 @torch.no_grad()
 def score_matrix_concat(model, image_feats, text_feats, device, q_chunk=128, c_chunk=512):
-    """Chunked GPU pairwise scorer for an early-fusion model that scores (image, caption) PAIRS
-    rather than producing standalone, independently-cacheable embeddings (see EarlyFusionScorer
-    above) — this means O(n*m) model calls instead of cosine_score_matrix's single matmul, which
-    is exactly the retrieval-time cost this project's efficiency comparison is built around.
-    Returns an (n, m) CPU score matrix of raw logits (not probabilities).
-    """
     model.eval()
     n, m = image_feats.shape[0], text_feats.shape[0]
     scores = torch.empty(n, m)
@@ -429,13 +340,10 @@ def score_matrix_concat(model, image_feats, text_feats, device, q_chunk=128, c_c
     return scores
 
 
-# --- Contrastive dual encoder (technique 2, notebook 04) ----------------------------------
-# First defined inline in notebook 04, needed identically in notebook 05's final comparison —
-# moved here per this file's own rule.
+# Contrastive dual encoder (technique 2, notebook 04), also used by notebook 05
 
+# Projects frozen ResNet-50 features into the shared contrastive embedding space
 class ImageProjector(nn.Module):
-    """Projects frozen ResNet-50 features into the shared, L2-normalised contrastive embedding
-    space used by the dual encoder."""
     def __init__(self, in_dim=2048, hidden=512, out_dim=256, dropout=0.1):
         super().__init__()
         self.net = nn.Sequential(
@@ -447,9 +355,8 @@ class ImageProjector(nn.Module):
         return self.net(x)
 
 
+# Projects frozen BERT features into the shared contrastive embedding space
 class TextProjector(nn.Module):
-    """Projects frozen BERT features into the shared, L2-normalised contrastive embedding space
-    used by the dual encoder."""
     def __init__(self, in_dim=768, hidden=512, out_dim=256, dropout=0.1):
         super().__init__()
         self.net = nn.Sequential(
@@ -461,18 +368,10 @@ class TextProjector(nn.Module):
         return self.net(x)
 
 
+# Builds and trains ImageProjector and TextProjector together using info_nce loss
 def train_dual_encoder(train_loader, val_loader, device, temperature=0.07, embed_dim=256,
                         image_in_dim=2048, text_in_dim=768, hidden=512, dropout=0.1, lr=1e-3,
                         max_epochs=30, patience=4, seed=None, verbose=True):
-    """Builds and jointly trains ImageProjector/TextProjector with info_nce (the Week 8 practical
-    formula). Early stopping within the run watches validation InfoNCE loss only (Week 7 rule).
-    Generalises notebook 04's inline training function (which closed over module-level globals)
-    so notebook 05 can retrain this exact technique (same architecture/temperature already
-    decided in 04's validation-Recall@10 sweep) without duplicating it a third time.
-
-    Returns (image_proj, text_proj, history, best_val_loss), with both heads' best (restored)
-    epoch weights already loaded.
-    """
     if seed is not None:
         torch.manual_seed(seed); np.random.seed(seed); random.seed(seed)
 
@@ -534,23 +433,10 @@ def train_dual_encoder(train_loader, val_loader, device, temperature=0.07, embed
     return image_proj, text_proj, history, best_val
 
 
-# --- Shared evaluation/data helpers (notebook 05 onward) ----------------------------------
-# Each of these was informally reinvented inline more than once (03/04) — consolidated here
-# the next time (05) they're needed, per this file's own rule.
+# Shared evaluation and data helpers (notebook 05)
 
+# Standardises image and text features using fit_split's mean/std, doesn't modify the original data
 def standardize_features(data, splits=("train", "val", "test"), fit_split="train"):
-    """Returns a NEW dict with image/text features standardised using `fit_split`'s mean/std
-    (train-only statistics, per the Week 7 rule), WITHOUT mutating `data`.
-
-    This matters starting with notebook 05: the dual encoder needs the original, un-standardised
-    features at the same time Ridge/the early-fusion MLP need standardised ones. Notebook 03's
-    original standardisation mutated `data` in place, which only worked there because that
-    notebook never needed both versions to coexist.
-
-    Each split's dict is shallow-copied — screenId/flat_df/eval_df are shared by reference, since
-    they are not modified — with image_features/flat_text_features/eval_text_features replaced by
-    standardised copies.
-    """
     img_mu = data[fit_split]["image_features"].mean(0, keepdim=True)
     img_sd = data[fit_split]["image_features"].std(0, keepdim=True).clamp(min=1e-6)
     txt_mu = data[fit_split]["flat_text_features"].mean(0, keepdim=True)
@@ -559,7 +445,7 @@ def standardize_features(data, splits=("train", "val", "test"), fit_split="train
     standardized = {}
     for split_name in splits:
         d = data[split_name]
-        new_d = dict(d)  # shallow copy: screenId/flat_df/eval_df untouched, shared by reference
+        new_d = dict(d) 
         new_d["image_features"] = (d["image_features"] - img_mu) / img_sd
         new_d["flat_text_features"] = (d["flat_text_features"] - txt_mu) / txt_sd
         new_d["eval_text_features"] = (d["eval_text_features"] - txt_mu) / txt_sd
@@ -567,26 +453,18 @@ def standardize_features(data, splits=("train", "val", "test"), fit_split="train
     return standardized
 
 
+# Row indices for a reproducible random subsample of size max_n out of n_total
 def subsample_idx(n_total, max_n, seed=0):
-    """Row indices for a reproducible random subsample of size `max_n` out of `n_total` (or all
-    `n_total` indices, in original order, if `max_n` is None or already >= n_total). Consolidates
-    the informal version each of notebooks 03/04 reinvented inline for capping expensive train-set
-    evaluation.
-    """
     if max_n is None or n_total <= max_n:
         return torch.arange(n_total)
     g = torch.Generator().manual_seed(seed)
     return torch.randperm(n_total, generator=g)[:max_n]
 
 
-# --- Plotting helpers (notebook 05 onward) -------------------------------------------------
-# The loss-curve figure (03, 04) and the score-heatmap figure (01, 03, 04) have each now been
-# hand-written three times; notebook 05 needing them a third/fourth time is exactly the trigger
-# this file's own module docstring describes for moving something here instead.
+# Plotting helpers (notebook 05) 
 
+# Plots train vs validation loss with the best epoch marked
 def plot_loss_curve(history, title, save_path, ylabel="loss"):
-    """Train-vs-validation loss curve with the restored best (lowest val-loss) epoch marked —
-    same figure used by notebooks 03 and 04's training loops."""
     fig, ax = plt.subplots(figsize=(7, 4.5))
     epochs = range(1, len(history["train_loss"]) + 1)
     best_epoch = int(np.argmin(history["val_loss"])) + 1
@@ -602,9 +480,8 @@ def plot_loss_curve(history, title, save_path, ylabel="loss"):
     return fig
 
 
+# Heatmap of a score matrix, showing only the first n_show rows/columns
 def plot_score_heatmap(scores, title, save_path, n_show=40, cbar_label="score"):
-    """Score-matrix heatmap diagnostic (first `n_show` rows/columns only, so the diagonal match
-    pattern is actually visible) — same figure used by notebooks 01, 03 and 04."""
     fig, ax = plt.subplots(figsize=(6, 5))
     im = ax.imshow(scores[:n_show, :n_show], cmap="viridis")
     ax.set_title(title)
